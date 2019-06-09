@@ -8,16 +8,49 @@ import java.io.FileInputStream
 import java.lang.Exception
 import java.util.*
 
-val FIELD_TYPE_XPATH = "declare namespace w='http://schemas.openxmlformats.org/wordprocessingml/2006/main' .//w:fldChar/@w:fldCharType"
-val FIELD_TYPE_VALUE = "declare namespace w='http://schemas.openxmlformats.org/wordprocessingml/2006/main' .//w:ffData/w:name/@w:val"
+val FIELD_TYPE_XPATH =
+    "declare namespace w='http://schemas.openxmlformats.org/wordprocessingml/2006/main' .//w:fldChar/@w:fldCharType"
+val FIELD_TYPE_VALUE =
+    "declare namespace w='http://schemas.openxmlformats.org/wordprocessingml/2006/main' .//w:ffData/w:name/@w:val"
 
 fun main(args: Array<String>) {
-    if (args.size < 2) {
-        throw Exception("Require at least two arguments: wordDocumentFile settingsFile1 [settingsFile2 [...]]")
+    if (args.size == 3 && args[0] == "--discover") {
+        createPropertiesStub(args.sliceArray(1 until args.size))
+    } else if (args.size >= 2) {
+        fillInDocument(args)
+    } else {
+        throw Exception("Require at least two arguments: [wordDocumentFile settingsFile1 [settingsFile2 [...]]] | [--discover wordDocumentFile outputFile]")
     }
+}
 
+fun createPropertiesStub(args: Array<String>) {
     val documentFilename = File(args[0]).absoluteFile
-    val outputFilename = File(documentFilename.parentFile, "${documentFilename.nameWithoutExtension}-filledIn.${documentFilename.extension}")
+    val outputPropertiesFile = File(args[1]).absoluteFile
+
+    XWPFDocument(documentFilename.inputStream()).use { doc ->
+        val allFields = sequence {
+            for (tbl in doc.tables) {
+                for (row in tbl.rows) {
+                    for (col in row.tableCells) {
+                        yieldAll(getFields(col.paragraphs))
+                    }
+                }
+            }
+            yieldAll(getFields(doc.paragraphs))
+        }
+
+        outputPropertiesFile.printWriter().use { out ->
+            allFields.map { "$it=Discovered field $it" }.forEach { out.println(it) }
+        }
+    }
+}
+
+private fun fillInDocument(args: Array<String>) {
+    val documentFilename = File(args[0]).absoluteFile
+    val outputFilename = File(
+        documentFilename.parentFile,
+        "${documentFilename.nameWithoutExtension}-filledIn.${documentFilename.extension}"
+    )
     val fillData = getFillData(args.slice(1 until args.size))
 
     println("Document FileName: $documentFilename\nFill Data: $fillData")
@@ -112,7 +145,7 @@ fun scanParagraphs(
 
             if (currentFieldName != null && fieldData != null && run.ctr.tList.size > 0) {
                 // clear out all existing texts
-                for(index in (run.ctr.tList.size - 1) downTo 0 ) {
+                for (index in (run.ctr.tList.size - 1) downTo 0) {
                     run.ctr.removeT(index)
                 }
 
@@ -120,6 +153,32 @@ fun scanParagraphs(
                     println("Assigning value: $currentFieldName = $fieldData")
                     run.ctr.addNewT().stringValue = fieldData
                     addedValue = true
+                }
+            }
+        }
+    }
+}
+
+fun getFields(paragraphs: Collection<XWPFParagraph>) = sequence<String> {
+    for (paragraph in paragraphs) {
+        for (run in paragraph.runs) {
+            val cursor = run.ctr.newCursor()
+            cursor.selectPath(FIELD_TYPE_XPATH)
+            while (cursor.hasNextSelection()) {
+                cursor.toNextSelection()
+                if (cursor.`object` !is SimpleValue) {
+                    println("Object not SimpleValue: ${cursor.`object`.javaClass}")
+                    continue
+                }
+
+                val obj = cursor.getObject() as SimpleValue
+                if ("begin" == obj.stringValue) {
+                    cursor.toParent()
+                    val formField = cursor.getObject().selectPath(FIELD_TYPE_VALUE)[0] as SimpleValue
+
+                    if (formField.stringValue.isNotBlank()) {
+                        yield(formField.stringValue) // field name
+                    }
                 }
             }
         }
